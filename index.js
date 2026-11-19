@@ -97,6 +97,82 @@ const auth = betterAuth({
     },
 });
 
+// stripe webhook, must be before express.json()
+// payment status becomes paid only from here, after verification
+app.post(['/webhooks/stripe', '/api/webhooks/stripe'], express.raw({ type: 'application/json' }), async (req, res) => {
+    const sig = req.headers['stripe-signature'];
+    let event;
+    try {
+        event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+    } catch (err) {
+        console.log('Webhook signature verification failed:', err.message);
+        return res.status(400).send(`Webhook Error: ${err.message}`);
+    }
+
+    if (event.type === 'checkout.session.completed') {
+        const session = event.data.object;
+        const appointmentId = session.metadata?.appointmentId;
+        const customerId = session.metadata?.customerId;
+
+        if (session.payment_status === 'paid' && appointmentId) {
+            // skip if this session is already saved
+            const existing = await transactions.findOne({ stripeSessionId: session.id });
+            if (!existing) {
+                // save transaction
+                await transactions.insertOne({
+                    appointmentId,
+                    customerId,
+                    amount: session.amount_total ? session.amount_total / 100 : 0,
+                    currency: session.currency,
+                    stripeSessionId: session.id,
+                    status: 'paid',
+                    createdAt: new Date(),
+                });
+                // now mark the appointment as paid
+                await appointments.updateOne(
+                    { _id: new ObjectId(appointmentId) },
+                    { $set: { paymentStatus: 'paid' } }
+                );
+            }
+        }
+    }
+
+    if (event.type === 'checkout.session.async_payment_failed' || event.type === 'payment_intent.payment_failed') {
+        const session = event.data.object;
+        if (session.id) {
+            await transactions.insertOne({
+                appointmentId: session.metadata?.appointmentId || null,
+                customerId: session.metadata?.customerId || null,
+                amount: session.amount_total ? session.amount_total / 100 : 0,
+                currency: session.currency || 'usd',
+                stripeSessionId: session.id,
+                status: 'failed',
+                createdAt: new Date(),
+            }).catch(() => {});
+        }
+    }
+
+    res.json({ received: true });
+});
+
+// middleware
+app.use(express.json());
+app.use(cors({
+    origin: [process.env.CLIENT_URL || 'http://localhost:3000', 'http://localhost:3000'],
+    credentials: true,
+}));
+
+// Better Auth routes: /api/auth/*
+app.all('/api/auth/*', toNodeHandler(auth));
+
+app.get('/', (req, res) => {
+    res.send('salon book is running');
+});
+
+app.get(['/health', '/api/health'], (req, res) => {
+    res.send({ success: true, message: 'SalonBook server is running' });
+});
+
 
 app.listen(port, () => {
     console.log(`salon book is running on port ${port}`);
