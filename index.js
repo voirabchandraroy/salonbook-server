@@ -173,6 +173,104 @@ app.get(['/health', '/api/health'], (req, res) => {
     res.send({ success: true, message: 'SalonBook server is running' });
 });
 
+// auth middlewares
+// verifyToken checks the jwt from the Authorization header, then loads
+// the user from db so role and blocked status are checked on the server.
+// it also accepts the better auth session token and the cookie session.
+function createJwtToken(user) {
+    return jwt.sign(
+        { sub: user._id.toString(), email: user.email, role: user.role },
+        JWT_SECRET,
+        { expiresIn: '7d' }
+    );
+}
+
+async function getUserFromRequest(req) {
+    const authHeader = req.headers.authorization;
+    if (authHeader) {
+        const token = authHeader.split(' ')[1];
+        if (token) {
+            // first try jwt
+            try {
+                const decoded = jwt.verify(token, JWT_SECRET);
+                if (decoded?.sub && ObjectId.isValid(decoded.sub)) {
+                    const user = await users.findOne({ _id: new ObjectId(decoded.sub) });
+                    if (user) return user;
+                }
+            } catch (err) {
+                // not a jwt, try session token below
+            }
+            // better auth session token
+            const session = await sessions.findOne({ token });
+            if (session && !(session.expiresAt && new Date(session.expiresAt) < new Date())) {
+                const user = await users.findOne({ _id: new ObjectId(session.userId) });
+                if (user) return user;
+            }
+        }
+    }
+    try {
+        const session = await auth.api.getSession({ headers: fromNodeHeaders(req.headers) });
+        if (session?.user?.id) {
+            let user = null;
+            if (ObjectId.isValid(session.user.id)) {
+                user = await users.findOne({ _id: new ObjectId(session.user.id) });
+            }
+            if (!user) user = await users.findOne({ _id: session.user.id });
+            if (!user && session.user.email) user = await users.findOne({ email: session.user.email });
+            if (user) return user;
+        }
+    } catch (err) {
+        // no cookie session
+    }
+    return null;
+}
+
+const verifyToken = async (req, res, next) => {
+    const user = await getUserFromRequest(req);
+    if (!user) {
+        res.status(401).send({ message: 'Unauthorized' });
+        return;
+    }
+    if (user.isBlocked) {
+        res.status(403).send({ message: 'Your account is blocked' });
+        return;
+    }
+    req.user = user;
+    next();
+};
+
+// must call these middlewares after verifyToken
+const verifyCustomer = async (req, res, next) => {
+    if (req.user.role !== 'customer') {
+        res.status(403).send({ message: 'Forbidden' });
+        return;
+    }
+    next();
+};
+
+const verifyAdmin = async (req, res, next) => {
+    if (req.user.role !== 'admin') {
+        res.status(403).send({ message: 'Forbidden' });
+        return;
+    }
+    next();
+};
+
+// get a jwt after login, client sends it as Authorization: Bearer <token>
+app.post(['/jwt', '/api/jwt'], verifyToken, (req, res) => {
+    const token = createJwtToken(req.user);
+    res.send({ token });
+});
+
+// remove password before sending user to client
+const toPublicUser = (user) => {
+    if (!user) return user;
+    const { password, ...safe } = user;
+    return safe;
+};
+
+const TIME_SLOTS = ['09:00', '10:00', '11:00', '12:00', '14:00', '15:00', '16:00', '17:00', '18:00'];
+
 
 app.listen(port, () => {
     console.log(`salon book is running on port ${port}`);
