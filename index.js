@@ -63,6 +63,40 @@ const services = database.collection("services");
 const appointments = database.collection("appointments");
 const transactions = database.collection("transactions");
 
+// better auth setup, extra user fields: role, isBlocked, phone
+// admin is created from .env below, not from public sign up
+// live client and server are on different domains, so the login cookie
+// needs SameSite=None on https (local http keeps lax)
+const isLiveHttps = (process.env.BETTER_AUTH_URL || '').startsWith('https://');
+const auth = betterAuth({
+    secret: process.env.BETTER_AUTH_SECRET || "dev-only-secret-change-me",
+    baseURL: process.env.BETTER_AUTH_URL || `http://localhost:${port}`,
+    trustedOrigins: [process.env.CLIENT_URL || 'http://localhost:3000', process.env.BETTER_AUTH_URL || `http://localhost:${port}`],
+    advanced: {
+        defaultCookieAttributes: isLiveHttps
+            ? { sameSite: 'none', secure: true }
+            : { sameSite: 'lax', secure: false },
+    },
+    database: mongodbAdapter(database),
+    emailAndPassword: {
+        enabled: true,
+        minPasswordLength: 6,
+    },
+    socialProviders: (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) ? {
+        google: {
+            clientId: process.env.GOOGLE_CLIENT_ID,
+            clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+        }
+    } : {},
+    user: {
+        additionalFields: {
+            role: { type: "string", defaultValue: "customer", required: false },
+            isBlocked: { type: "boolean", defaultValue: false, required: false },
+            phone: { type: "string", required: false },
+        }
+    },
+});
+
 
 app.listen(port, () => {
     console.log(`salon book is running on port ${port}`);
