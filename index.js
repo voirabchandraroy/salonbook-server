@@ -335,6 +335,136 @@ app.patch(['/users/me/profile', '/api/users/me/profile'], verifyToken, async (re
     res.send(result);
 });
 
+// services related apis
+app.get(['/services', '/api/services'], async (req, res) => {
+    const query = {};
+    // public page shows only active services.
+    // admin can pass ?all=true (checked below with a token if present)
+    let showAll = false;
+    if (req.query.all === 'true') {
+        const user = await getUserFromRequest(req);
+        if (user && user.role === 'admin' && !user.isBlocked) showAll = true;
+    }
+    if (!showAll) {
+        query.status = 'active';
+    }
+
+    if (req.query) {
+        if (req.query.category) {
+            query.category = req.query.category;
+        }
+        if (req.query.search) {
+            query.$or = [
+                { serviceName: { $regex: req.query.search, $options: 'i' } },
+                { category: { $regex: req.query.search, $options: 'i' } },
+                { description: { $regex: req.query.search, $options: 'i' } }
+            ];
+        }
+    }
+
+    let cursor = services.find(query);
+    if (req.query.sort === 'price_asc') {
+        cursor = cursor.sort({ price: 1 });
+    } else if (req.query.sort === 'price_desc') {
+        cursor = cursor.sort({ price: -1 });
+    }
+    const result = await cursor.toArray();
+    res.send(result);
+});
+
+app.get(['/services/:id', '/api/services/:id'], async (req, res) => {
+    const id = req.params.id;
+    if (!ObjectId.isValid(id)) {
+        return res.status(404).send({ message: 'Service not found' });
+    }
+    const query = { _id: new ObjectId(id) };
+    const result = await services.findOne(query);
+    if (!result) {
+        return res.status(404).send({ message: 'Service not found' });
+    }
+    res.send(result);
+});
+
+app.post(['/services', '/api/services'], verifyToken, verifyAdmin, async (req, res) => {
+    const { serviceName, category, description, price, duration, image, status } = req.body;
+    if (!serviceName || !category || !description || !image) {
+        return res.status(400).send({ message: 'serviceName, category, description and image are required' });
+    }
+    if (!(Number(price) > 0) || !(Number(duration) > 0)) {
+        return res.status(400).send({ message: 'Price and duration must be positive numbers' });
+    }
+    const service = {
+        serviceName,
+        category,
+        description,
+        price: Number(price),
+        duration: Number(duration),
+        image,
+        status: status === 'inactive' ? 'inactive' : 'active',
+        createdAt: new Date(),
+    };
+    const result = await services.insertOne(service);
+    res.send(result);
+});
+
+app.put(['/services/:id', '/api/services/:id'], verifyToken, verifyAdmin, async (req, res) => {
+    const id = req.params.id;
+    if (!ObjectId.isValid(id)) return res.status(404).send({ message: 'Service not found' });
+    const { serviceName, category, description, price, duration, image, status } = req.body;
+    if (price !== undefined && !(Number(price) > 0)) {
+        return res.status(400).send({ message: 'Price must be a positive number' });
+    }
+    if (duration !== undefined && !(Number(duration) > 0)) {
+        return res.status(400).send({ message: 'Duration must be a positive number' });
+    }
+    const updatedDoc = {
+        $set: {
+            ...(serviceName && { serviceName }),
+            ...(category && { category }),
+            ...(description && { description }),
+            ...(price !== undefined && { price: Number(price) }),
+            ...(duration !== undefined && { duration: Number(duration) }),
+            ...(image && { image }),
+            ...(status && { status }),
+        }
+    };
+    const result = await services.updateOne({ _id: new ObjectId(id) }, updatedDoc);
+    res.send(result);
+});
+
+app.patch(['/services/:id/status', '/api/services/:id/status'], verifyToken, verifyAdmin, async (req, res) => {
+    const id = req.params.id;
+    if (!ObjectId.isValid(id)) return res.status(404).send({ message: 'Service not found' });
+    const status = req.body.status === 'inactive' ? 'inactive' : 'active';
+    const result = await services.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { status } }
+    );
+    res.send(result);
+});
+
+// same status update, client admin toggle uses this one
+app.patch(['/services/:id', '/api/services/:id'], verifyToken, verifyAdmin, async (req, res) => {
+    const id = req.params.id;
+    if (!ObjectId.isValid(id)) return res.status(404).send({ message: 'Service not found' });
+    if (req.body.status !== 'active' && req.body.status !== 'inactive') {
+        return res.status(400).send({ message: 'Status must be active or inactive' });
+    }
+    const result = await services.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { status: req.body.status } }
+    );
+    res.send(result);
+});
+
+app.delete(['/services/:id', '/api/services/:id'], verifyToken, verifyAdmin, async (req, res) => {
+    const id = req.params.id;
+    if (!ObjectId.isValid(id)) return res.status(404).send({ message: 'Service not found' });
+    const query = { _id: new ObjectId(id) };
+    const result = await services.deleteOne(query);
+    res.send(result);
+});
+
 
 app.listen(port, () => {
     console.log(`salon book is running on port ${port}`);
