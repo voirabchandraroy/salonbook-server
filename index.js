@@ -655,6 +655,37 @@ app.patch(['/appointments/:id', '/api/appointments/:id'], verifyToken, async (re
     res.send(result);
 });
 
+// dashboard apis
+app.get(['/dashboard/admin', '/api/dashboard/admin'], verifyToken, verifyAdmin, async (req, res) => {
+    const totalCustomers = await users.countDocuments({ role: 'customer' });
+    const totalActiveServices = await services.countDocuments({ status: 'active' });
+    const totalAppointments = await appointments.countDocuments({});
+    const pendingAppointments = await appointments.countDocuments({ status: 'pending' });
+    const confirmedAppointments = await appointments.countDocuments({ status: 'confirmed' });
+    const totalSuccessfulPayments = await transactions.countDocuments({ status: 'paid' });
+    const paidTx = await transactions.find({ status: 'paid' }).toArray();
+    const totalRevenue = paidTx.reduce((sum, t) => sum + (t.amount || 0), 0);
+    res.send({
+        totalCustomers,
+        totalActiveServices,
+        totalAppointments,
+        pendingAppointments,
+        confirmedAppointments,
+        totalSuccessfulPayments,
+        totalRevenue,
+    });
+});
+
+app.get(['/dashboard/customer', '/api/dashboard/customer'], verifyToken, verifyCustomer, async (req, res) => {
+    const customerId = req.user._id.toString();
+    const total = await appointments.countDocuments({ customerId });
+    const pending = await appointments.countDocuments({ customerId, status: 'pending' });
+    const confirmed = await appointments.countDocuments({ customerId, status: 'confirmed' });
+    const cancelled = await appointments.countDocuments({ customerId, status: 'cancelled' });
+    const paid = await appointments.countDocuments({ customerId, paymentStatus: 'paid' });
+    res.send({ total, pending, confirmed, cancelled, paid });
+});
+
 
 app.listen(port, () => {
     console.log(`salon book is running on port ${port}`);
