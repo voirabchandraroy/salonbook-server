@@ -271,6 +271,70 @@ const toPublicUser = (user) => {
 
 const TIME_SLOTS = ['09:00', '10:00', '11:00', '12:00', '14:00', '15:00', '16:00', '17:00', '18:00'];
 
+// users related apis
+app.get(['/users', '/api/users'], verifyToken, verifyAdmin, async (req, res) => {
+    const cursor = users.find({});
+    const result = await cursor.toArray();
+    res.send(result.map(toPublicUser));
+});
+
+app.get(['/users/:id', '/api/users/:id'], verifyToken, verifyAdmin, async (req, res) => {
+    const id = req.params.id;
+    const query = { _id: new ObjectId(id) };
+    const result = await users.findOne(query);
+    res.send(toPublicUser(result));
+});
+
+// admin can change a role from the admin panel (never from profile update)
+app.patch(['/users/:id/role', '/api/users/:id/role'], verifyToken, verifyAdmin, async (req, res) => {
+    const id = req.params.id;
+    const query = { _id: new ObjectId(id) };
+    const updatedDoc = {
+        $set: {
+            role: req.body.role,
+        }
+    };
+    const result = await users.updateOne(query, updatedDoc);
+    res.send(result);
+});
+
+// admin block / unblock a customer
+app.patch(['/users/:id/block', '/api/users/:id/block'], verifyToken, verifyAdmin, async (req, res) => {
+    const id = req.params.id;
+    if (req.user._id.toString() === id) {
+        return res.status(400).send({ message: 'You cannot block yourself' });
+    }
+    const target = await users.findOne({ _id: new ObjectId(id) });
+    if (!target) return res.status(404).send({ message: 'User not found' });
+    if (target.role === 'admin') {
+        return res.status(403).send({ message: 'You cannot block an admin' });
+    }
+    const isBlocked = typeof req.body.isBlocked === 'boolean' ? req.body.isBlocked : !target.isBlocked;
+    const result = await users.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { isBlocked } }
+    );
+    res.send({ ...result, isBlocked });
+});
+
+// logged-in user updates own profile: name, image, phone only
+// role and isBlocked can never be changed from here
+app.patch(['/users/me/profile', '/api/users/me/profile'], verifyToken, async (req, res) => {
+    if (req.body.role !== undefined || req.body.isBlocked !== undefined) {
+        return res.status(403).send({ message: 'You cannot change your role or blocked status' });
+    }
+    const updatedDoc = { $set: {} };
+    if (req.body.name) updatedDoc.$set.name = req.body.name;
+    if (req.body.image !== undefined) updatedDoc.$set.image = req.body.image;
+    if (req.body.phone !== undefined) updatedDoc.$set.phone = req.body.phone;
+
+    const result = await users.updateOne(
+        { _id: new ObjectId(req.user._id) },
+        updatedDoc
+    );
+    res.send(result);
+});
+
 
 app.listen(port, () => {
     console.log(`salon book is running on port ${port}`);
