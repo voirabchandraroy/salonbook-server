@@ -465,6 +465,196 @@ app.delete(['/services/:id', '/api/services/:id'], verifyToken, verifyAdmin, asy
     res.send(result);
 });
 
+// appointments related apis
+app.get(['/appointments', '/api/appointments'], verifyToken, async (req, res) => {
+    const query = {};
+
+    // admin sees all, customer sees only own appointments
+    if (req.user.role !== 'admin') {
+        query.customerId = req.user._id.toString();
+    }
+    if (req.query.customerId && req.user.role === 'admin') {
+        query.customerId = req.query.customerId;
+    }
+    if (req.query.status) {
+        query.status = req.query.status;
+    }
+
+    const cursor = appointments.find(query).sort({ createdAt: -1 });
+    const result = await cursor.toArray();
+
+    // attach service + customer info for the dashboard tables
+    const enriched = [];
+    for (const appt of result) {
+        const service = ObjectId.isValid(appt.serviceId)
+            ? await services.findOne({ _id: new ObjectId(appt.serviceId) })
+            : null;
+        const customer = ObjectId.isValid(appt.customerId)
+            ? await users.findOne({ _id: new ObjectId(appt.customerId) })
+            : null;
+        enriched.push({
+            ...appt,
+            service: service || null,
+            customer: customer ? toPublicUser(customer) : null,
+        });
+    }
+    res.send(enriched);
+});
+
+// my appointments (customer dashboard)
+app.get(['/appointments/my', '/api/appointments/my'], verifyToken, verifyCustomer, async (req, res) => {
+    const query = { customerId: req.user._id.toString() };
+    const result = await appointments.find(query).sort({ createdAt: -1 }).toArray();
+    const enriched = [];
+    for (const appt of result) {
+        const service = ObjectId.isValid(appt.serviceId)
+            ? await services.findOne({ _id: new ObjectId(appt.serviceId) })
+            : null;
+        enriched.push({ ...appt, service: service || null });
+    }
+    res.send(enriched);
+});
+
+app.get(['/appointments/count', '/api/appointments/count'], async (req, res) => {
+    const query = {};
+    if (req.query.customerId) {
+        query.customerId = req.query.customerId;
+    }
+    const result = await appointments.countDocuments(query);
+    res.send({ count: result });
+});
+
+app.get(['/appointments/:id', '/api/appointments/:id'], verifyToken, async (req, res) => {
+    const id = req.params.id;
+    if (!ObjectId.isValid(id)) return res.status(404).send({ message: 'Appointment not found' });
+    const result = await appointments.findOne({ _id: new ObjectId(id) });
+    if (!result) return res.status(404).send({ message: 'Appointment not found' });
+    if (req.user.role !== 'admin' && result.customerId !== req.user._id.toString()) {
+        return res.status(403).send({ message: 'Forbidden' });
+    }
+    res.send(result);
+});
+
+app.post(['/appointments', '/api/appointments'], verifyToken, verifyCustomer, async (req, res) => {
+    const { serviceId, appointmentDate, timeSlot, message } = req.body;
+
+    if (!serviceId || !appointmentDate || !timeSlot) {
+        return res.status(400).send({ message: 'serviceId, appointmentDate and timeSlot are required' });
+    }
+    if (!ObjectId.isValid(serviceId)) {
+        return res.status(404).send({ message: 'Service not found' });
+    }
+    if (!TIME_SLOTS.includes(timeSlot)) {
+        return res.status(400).send({ message: 'Invalid time slot' });
+    }
+
+    const service = await services.findOne({ _id: new ObjectId(serviceId) });
+    if (!service) return res.status(404).send({ message: 'Service not found' });
+    if (service.status !== 'active') {
+        return res.status(400).send({ message: 'This service is not available for booking' });
+    }
+
+    const date = new Date(appointmentDate);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    if (isNaN(date.getTime()) || date < today) {
+        return res.status(400).send({ message: 'Appointment date must be today or in the future' });
+    }
+
+    // prevent duplicate active appointment for same customer + service + date + slot
+    const duplicate = await appointments.findOne({
+        customerId: req.user._id.toString(),
+        serviceId,
+        appointmentDate: date,
+        timeSlot,
+        status: { $in: ['pending', 'confirmed'] },
+    });
+    if (duplicate) {
+        return res.status(409).send({ message: 'You already have an appointment for this service on this date and time' });
+    }
+
+    const appointment = {
+        serviceId,
+        customerId: req.user._id.toString(),
+        appointmentDate: date,
+        timeSlot,
+        message: message || '',
+        servicePrice: service.price,
+        paymentStatus: 'unpaid',
+        status: 'pending',
+        createdAt: new Date(),
+    };
+    const result = await appointments.insertOne(appointment);
+    res.send(result);
+});
+
+// admin confirms a pending appointment
+app.patch(['/appointments/:id/confirm', '/api/appointments/:id/confirm'], verifyToken, verifyAdmin, async (req, res) => {
+    const id = req.params.id;
+    if (!ObjectId.isValid(id)) return res.status(404).send({ message: 'Appointment not found' });
+    const appt = await appointments.findOne({ _id: new ObjectId(id) });
+    if (!appt) return res.status(404).send({ message: 'Appointment not found' });
+    if (appt.status !== 'pending') {
+        return res.status(400).send({ message: 'Only pending appointments can be confirmed' });
+    }
+    const result = await appointments.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { status: 'confirmed' } }
+    );
+    res.send(result);
+});
+
+// customer cancels own pending, admin cancels pending/confirmed
+app.patch(['/appointments/:id/cancel', '/api/appointments/:id/cancel'], verifyToken, async (req, res) => {
+    const id = req.params.id;
+    if (!ObjectId.isValid(id)) return res.status(404).send({ message: 'Appointment not found' });
+    const appt = await appointments.findOne({ _id: new ObjectId(id) });
+    if (!appt) return res.status(404).send({ message: 'Appointment not found' });
+
+    if (req.user.role === 'admin') {
+        if (!['pending', 'confirmed'].includes(appt.status)) {
+            return res.status(400).send({ message: 'This appointment cannot be cancelled' });
+        }
+    } else {
+        if (appt.customerId !== req.user._id.toString()) {
+            return res.status(403).send({ message: 'Forbidden' });
+        }
+        if (appt.status !== 'pending') {
+            return res.status(400).send({ message: 'You can only cancel a pending appointment' });
+        }
+    }
+
+    const result = await appointments.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { status: 'cancelled' } }
+    );
+    res.send(result);
+});
+
+// status update with the same rules as above
+app.patch(['/appointments/:id', '/api/appointments/:id'], verifyToken, async (req, res) => {
+    const id = req.params.id;
+    const { status } = req.body;
+    if (!ObjectId.isValid(id)) return res.status(404).send({ message: 'Appointment not found' });
+    if (!['pending', 'confirmed', 'cancelled'].includes(status)) {
+        return res.status(400).send({ message: 'Invalid status' });
+    }
+    const appt = await appointments.findOne({ _id: new ObjectId(id) });
+    if (!appt) return res.status(404).send({ message: 'Appointment not found' });
+
+    if (status === 'confirmed' && req.user.role !== 'admin') {
+        return res.status(403).send({ message: 'Forbidden' });
+    }
+    if (req.user.role !== 'admin' && appt.customerId !== req.user._id.toString()) {
+        return res.status(403).send({ message: 'Forbidden' });
+    }
+    const result = await appointments.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { status } }
+    );
+    res.send(result);
+});
+
 
 app.listen(port, () => {
     console.log(`salon book is running on port ${port}`);
