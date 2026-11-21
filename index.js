@@ -686,6 +686,33 @@ app.get(['/dashboard/customer', '/api/dashboard/customer'], verifyToken, verifyC
     res.send({ total, pending, confirmed, cancelled, paid });
 });
 
+// image upload to imgbb
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
+
+app.post(['/upload', '/api/upload'], verifyToken, upload.single('image'), async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).send({ message: 'Image file is required' });
+        }
+        if (!process.env.IMGBB_API_KEY) {
+            return res.status(500).send({ message: 'ImgBB API key is not configured' });
+        }
+        const form = new FormData();
+        form.append('image', new Blob([req.file.buffer], { type: req.file.mimetype }), req.file.originalname || 'image.jpg');
+        const imgRes = await fetch(`https://api.imgbb.com/1/upload?key=${process.env.IMGBB_API_KEY}`, {
+            method: 'POST',
+            body: form,
+        });
+        const data = await imgRes.json();
+        if (!data.success) {
+            return res.status(502).send({ message: 'Image upload failed' });
+        }
+        res.send({ url: data.data.url });
+    } catch (err) {
+        res.status(500).send({ message: 'Image upload failed', error: err.message });
+    }
+});
+
 
 app.listen(port, () => {
     console.log(`salon book is running on port ${port}`);
