@@ -789,6 +789,38 @@ app.post(['/payments/checkout-verify', '/api/payments/checkout-verify'], async (
     res.send({ success: false, paid: false, message: 'Payment verification failed' });
 });
 
+// transactions related apis
+app.get(['/transactions', '/api/transactions'], verifyToken, verifyAdmin, async (req, res) => {
+    const result = await transactions.find({}).sort({ createdAt: -1 }).toArray();
+    const enriched = [];
+    for (const tx of result) {
+        const customer = tx.customerId && ObjectId.isValid(tx.customerId)
+            ? await users.findOne({ _id: new ObjectId(tx.customerId) })
+            : null;
+        const appt = tx.appointmentId && ObjectId.isValid(tx.appointmentId)
+            ? await appointments.findOne({ _id: new ObjectId(tx.appointmentId) })
+            : null;
+        const service = appt && ObjectId.isValid(appt.serviceId)
+            ? await services.findOne({ _id: new ObjectId(appt.serviceId) })
+            : null;
+        enriched.push({
+            ...tx,
+            customer: customer ? toPublicUser(customer) : null,
+            appointment: appt || null,
+            service: service || null,
+        });
+    }
+    res.send(enriched);
+});
+
+app.get(['/transactions/my', '/api/transactions/my'], verifyToken, verifyCustomer, async (req, res) => {
+    const result = await transactions
+        .find({ customerId: req.user._id.toString() })
+        .sort({ createdAt: -1 })
+        .toArray();
+    res.send(result);
+});
+
 
 app.listen(port, () => {
     console.log(`salon book is running on port ${port}`);
