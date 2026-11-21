@@ -713,6 +713,82 @@ app.post(['/upload', '/api/upload'], verifyToken, upload.single('image'), async 
     }
 });
 
+// payments related apis
+// create stripe checkout session for a confirmed appointment
+app.post(['/payments/checkout/:appointmentId', '/api/payments/checkout/:appointmentId'], verifyToken, verifyCustomer, async (req, res) => {
+    const appointmentId = req.params.appointmentId;
+    if (!ObjectId.isValid(appointmentId)) {
+        return res.status(404).send({ message: 'Appointment not found' });
+    }
+    const appt = await appointments.findOne({ _id: new ObjectId(appointmentId) });
+    if (!appt) return res.status(404).send({ message: 'Appointment not found' });
+    if (appt.customerId !== req.user._id.toString()) {
+        return res.status(403).send({ message: 'Forbidden' });
+    }
+    if (appt.status !== 'confirmed') {
+        return res.status(400).send({ message: 'You can only pay for a confirmed appointment' });
+    }
+    if (appt.paymentStatus === 'paid') {
+        return res.status(400).send({ message: 'This appointment is already paid' });
+    }
+
+    const service = ObjectId.isValid(appt.serviceId)
+        ? await services.findOne({ _id: new ObjectId(appt.serviceId) })
+        : null;
+
+    const clientUrl = process.env.CLIENT_URL || 'http://localhost:3000';
+    const session = await stripe.checkout.sessions.create({
+        mode: 'payment',
+        payment_method_types: ['card'],
+        customer_email: req.user.email,
+        line_items: [{
+            price_data: {
+                currency: 'usd',
+                product_data: { name: service ? service.serviceName : 'Salon Service' },
+                unit_amount: Math.round(appt.servicePrice * 100),
+            },
+            quantity: 1,
+        }],
+        success_url: `${clientUrl}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${clientUrl}/payment/cancel`,
+        metadata: {
+            appointmentId: appointmentId,
+            customerId: req.user._id.toString(),
+        },
+    });
+
+    res.send({ url: session.url, sessionId: session.id });
+});
+
+// check checkout session after returning from stripe
+// this only reads the status, paid update happens in the webhook above
+app.post(['/payments/checkout-verify', '/api/payments/checkout-verify'], async (req, res) => {
+    const { sessionId } = req.body;
+
+    if (!sessionId) {
+        return res.send({ success: false, message: 'Session ID is required' });
+    }
+
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+    const { status, payment_status, customer_email, metadata, payment_intent } = session;
+
+    if (status === 'complete' && payment_status === 'paid') {
+        const existingPayment = await transactions.findOne({ stripeSessionId: sessionId });
+        return res.send({
+            success: true,
+            paid: true,
+            verifiedByWebhook: !!existingPayment,
+            message: existingPayment
+                ? 'Payment verified by webhook'
+                : 'Payment received, waiting for webhook confirmation',
+            customer_email,
+            payment_intent,
+            metadata,
+        });
+    }
+    res.send({ success: false, paid: false, message: 'Payment verification failed' });
+});
+
 
 app.listen(port, () => {
     console.log(`salon book is running on port ${port}`);
