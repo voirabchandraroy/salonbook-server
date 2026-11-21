@@ -821,9 +821,38 @@ app.get(['/transactions/my', '/api/transactions/my'], verifyToken, verifyCustome
     res.send(result);
 });
 
+// create admin from .env, only once
+async function seedAdmin() {
+    try {
+        if (process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD) {
+            const existingAdmin = await users.findOne({ email: process.env.ADMIN_EMAIL });
+            if (!existingAdmin) {
+                await auth.api.signUpEmail({
+                    body: {
+                        name: process.env.ADMIN_NAME || 'Salon Admin',
+                        email: process.env.ADMIN_EMAIL,
+                        password: process.env.ADMIN_PASSWORD,
+                    }
+                });
+                await users.updateOne(
+                    { email: process.env.ADMIN_EMAIL },
+                    { $set: { role: 'admin', isBlocked: false } }
+                );
+                console.log('Seeded admin account:', process.env.ADMIN_EMAIL);
+            }
+        }
+    } catch (err) {
+        console.log('Seed failed:', err.message);
+    }
+}
 
-app.listen(port, () => {
-    console.log(`salon book is running on port ${port}`);
-});
+await seedAdmin();
+
+// vercel e listen lagbe na, okhane app tai export hoy
+if (!process.env.VERCEL) {
+    app.listen(port, () => {
+        console.log(`salon book is running on port ${port}`);
+    });
+}
 
 export default app;
